@@ -1,0 +1,13 @@
+[Unit]
+Description=Notes server
+
+[Service]
+Type=exec
+User=user
+Group=group
+ExecStart=/home/user/.local/bin/service
+ExecReload=/bin/kill -HUP $MAINPID
+#Restart=always
+
+[Install]
+WantedBy=multi-user.target
