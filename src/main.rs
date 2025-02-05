@@ -166,13 +166,15 @@ impl SrvState {
         if index.is_empty() {
             warn!("Index is empty!");
         }
-        let (index_html, _) =
-            markdown_to_document(&generate_index_html(&index), Meta {
+        let (index_html, _) = markdown_to_document(
+            &generate_index_html(&index),
+            Meta {
                 title: String::from("Index"),
                 date: NaiveDate::default().into(),
                 lang: None,
                 desc: None,
-            });
+            },
+        );
         Ok(Self {
             content_path,
             index,
@@ -258,8 +260,13 @@ fn generate_index(content_path: &Path) -> std::io::Result<Index> {
                 return Ok(true);
             }
             let metadata = fs::metadata(path)?;
-            let created =
-                DateTime::<chrono::offset::Local>::from(metadata.created()?).date_naive();
+            let created = DateTime::<chrono::offset::Local>::from(
+                metadata
+                    .created()
+                    .or(metadata.modified())
+                    .unwrap_or_else(|_| std::time::SystemTime::now()),
+            )
+            .date_naive();
             let title = match Path::new(path.file_name().expect("not a dir"))
                 .file_prefix()
                 .and_then(|x| x.to_str())
