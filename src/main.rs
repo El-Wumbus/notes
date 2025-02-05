@@ -1,22 +1,25 @@
 #![feature(path_file_prefix)]
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime};
-use clap::Parser;
 use log::{error, info, warn};
 use rinja::Template;
 use serde::{Deserialize, Serialize};
+use signal_hook::consts::SIGHUP;
 use std::path::{Path, PathBuf};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 use std::{
-    env, fs,
-    io::{self, Write},
+    fs,
+    io::{self, Read, Write},
 };
 use tiny_http::{Header, Method, Request, Response, Server};
 
 #[allow(dead_code)]
 mod uri;
-const STYLES: &str = include_str!("styles.css");
 
-// TODO: Config & content reloading
+const STYLES: &str = include_str!("styles.css");
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct Config {
@@ -57,34 +60,97 @@ fn main() {
     env_logger::Builder::new()
         .filter(None, LevelFilter::Debug)
         .init();
+    let reload_state = Arc::new(AtomicBool::new(false));
+    signal_hook::flag::register(SIGHUP, reload_state.clone()).unwrap();
 
-    let home = PathBuf::from(env::var_os("HOME").unwrap());
-    let config_dir = home.join(".config/notes");
-    let config_path = config_dir.join("notes.toml");
-    let config = Config::default();
-    let config = if config_path.exists() {
-        let contents = std::fs::read_to_string(&config_path).unwrap();
-        let config: Config = match toml::de::from_str(&contents) {
-            Ok(a) => a,
-            Err(e) => {
-                error!("Config: {e}");
-                config
-            }
-        };
-        config
-    } else {
-        if !config_dir.exists() {
-            std::fs::create_dir_all(config_dir).unwrap();
-        }
-        let mut config_f = fs::File::create(&config_path).unwrap();
-        let contents = toml::ser::to_string(&config).unwrap();
-        config_f.write_all(contents.as_bytes()).unwrap();
-        config
-    };
+    let config_path = dirs::config_dir()
+        .expect("config directory")
+        .join("notes/notes.toml");
+    let mut config = load_config(&config_path);
 
     let content_path = fs::canonicalize(config.content_path).unwrap();
-    let state = SrvState::load(content_path).unwrap();
-    state.serve(Server::http(config.bind).unwrap());
+    let state = match SrvState::load(content_path) {
+        Ok(s) => Arc::new(Mutex::new(s)),
+        Err(e) => {
+            error!("Failed to load state: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    std::thread::spawn({
+        let state = Arc::clone(&state);
+        move || match Server::http(config.bind) {
+            Ok(server) => SrvState::serve(state, server),
+            Err(e) => {
+                error!("Failed to bind server to {}: {}", config.bind, e);
+                std::process::exit(1);
+            }
+        }
+    });
+
+    loop {
+        config = load_config(&config_path);
+        if reload_state.swap(false, Ordering::Relaxed) {
+            info!("Reloading state...");
+            let Ok(mut state) = state.lock() else { break };
+            match SrvState::load(config.content_path) {
+                Ok(s) => {
+                    info!("State reloaded sucessfully!");
+                    *state = s;
+                }
+                Err(e) => {
+                    error!("Failed to reload state (retaining previous state): {e}")
+                }
+            }
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(256));
+    }
+}
+
+fn load_config(config_path: impl AsRef<Path>) -> Config {
+    let config_path = config_path.as_ref();
+    let config_dir = config_path
+        .parent()
+        .expect("this is a file with a parent dir");
+    let mut config = Config::default();
+    if config_path.exists() {
+        let contents = match std::fs::read_to_string(config_path) {
+            Ok(contents) => contents,
+            Err(e) => {
+                error!("Failed to read config file \"{config_path:?}\": {e}");
+                warn!("Using default config");
+                return config;
+            }
+        };
+        match toml::de::from_str(&contents) {
+            Ok(x) => config = x,
+            Err(e) => {
+                error!("Failed to parse config: {e}");
+                warn!("Using default config");
+            }
+        }
+    } else {
+        info!("Using default config");
+        if !config_dir.exists() {
+            if let Err(e) = std::fs::create_dir_all(config_dir) {
+                error!(
+                    "Couldn't create parent directory \"{config_dir:?}\" for new config file \"{config_path:?}\": {e}"
+                );
+                return config;
+            }
+        }
+        let contents = toml::ser::to_string(&config).unwrap();
+        match fs::File::create(config_path) {
+            Ok(mut f) => {
+                if let Err(e) = f.write_all(contents.as_bytes()) {
+                    error!("Failed to write default config to \"{config_path:?}\": {e}");
+                }
+            }
+            Err(e) => error!("Failed to create config file \"{config_path:?}\": {e}"),
+        }
+    }
+    config
 }
 
 #[derive(Default)]
@@ -100,12 +166,13 @@ impl SrvState {
         if index.is_empty() {
             warn!("Index is empty!");
         }
-        let index_html = markdown_to_document(&generate_index_html(dbg!(&index)), Meta {
-            title: String::from("Index"),
-            date: NaiveDate::default().into(),
-            lang: None,
-            desc: None,
-        });
+        let (index_html, _) =
+            markdown_to_document(&generate_index_html(&index), Meta {
+                title: String::from("Index"),
+                date: NaiveDate::default().into(),
+                lang: None,
+                desc: None,
+            });
         Ok(Self {
             content_path,
             index,
@@ -113,9 +180,8 @@ impl SrvState {
         })
     }
 
-    fn serve(&self, server: Server) {
+    fn serve(state: Arc<Mutex<Self>>, server: Server) {
         loop {
-            // blocks until the next request is received
             let request = match server.recv() {
                 Ok(rq) => rq,
                 Err(e) => {
@@ -124,28 +190,32 @@ impl SrvState {
                 }
             };
 
-            let path = uri::percent_decode(request.url()).unwrap();
+            let state = state.lock().unwrap();
+
             let method = request.method();
-            info!("Got {method} {path}");
+            let Some(path) = uri::percent_decode(request.url()) else {
+                respond_or_log(request, Response::empty(400));
+                continue;
+            };
+
             match (path.as_str(), method) {
                 ("/", Method::Get) => respond_or_log(
                     request,
-                    Response::from_string(&self.index_html).with_header(
+                    Response::from_string(&state.index_html).with_header(
                         Header::from_bytes(b"Content-Type", b"text/html").unwrap(),
                     ),
                 ),
                 _ if path.starts_with("/note/") => {
                     let path = path.strip_prefix("/note/").unwrap();
                     let Some(entry) =
-                        self.index.iter().find(|entry| entry.rel_path == path)
+                        state.index.iter().find(|entry| entry.rel_path == path)
                     else {
-                        warn!("Couldn't find requested note: '{path}'");
                         respond_or_log(request, Response::empty(404));
                         continue;
                     };
-                    let data_path = self.content_path.join(entry.rel_path.as_str());
+                    let data_path = state.content_path.join(entry.rel_path.as_str());
                     let data = std::fs::read_to_string(&data_path).unwrap();
-                    let document = markdown_to_document(
+                    let (document, _) = markdown_to_document(
                         &data,
                         Meta::inferred(entry.title.clone(), entry.created),
                     );
@@ -160,6 +230,7 @@ impl SrvState {
                     respond_or_log(request, Response::empty(404));
                 }
             }
+            std::mem::drop(state);
         }
     }
 }
@@ -170,10 +241,17 @@ fn respond_or_log<R: io::Read>(request: Request, response: Response<R>) {
     }
 }
 
-// TODO: Error handling -- no more unwrapping in the wwalk!!!
 fn generate_index(content_path: &Path) -> std::io::Result<Index> {
     let mut index = Vec::new();
+    let mut contents = String::new();
     walk(content_path, &mut |is_dir, path| {
+        if path
+            .file_name()
+            .map(|x| x.as_encoded_bytes())
+            .is_some_and(|x| x.starts_with(b"."))
+        {
+            return Ok(false);
+        }
         if !is_dir {
             let guess = mime_guess::from_path(path).first();
             if guess.is_none_or(|guess| guess != "text/markdown") {
@@ -182,13 +260,38 @@ fn generate_index(content_path: &Path) -> std::io::Result<Index> {
             let metadata = fs::metadata(path)?;
             let created =
                 DateTime::<chrono::offset::Local>::from(metadata.created()?).date_naive();
-            let title = Path::new(path.file_name().unwrap()).file_prefix().unwrap();
+            let title = match Path::new(path.file_name().expect("not a dir"))
+                .file_prefix()
+                .and_then(|x| x.to_str())
+            {
+                Some(t) => t.to_string(),
+                None => {
+                    warn!(
+                        "Invalid document title found in \"{path:?}\". Will attempt to find a title in its metadata..."
+                    );
+                    String::from("INVALID")
+                }
+            };
 
-            let rel_path = path.strip_prefix(content_path).unwrap();
+            let mut f = fs::File::open(path)?;
+            f.read_to_string(&mut contents)?;
+            let (_, meta) =
+                markdown_to_document(&contents, Meta::inferred(title, created));
+            contents.clear();
+            let Some(rel_path) = path
+                .strip_prefix(content_path)
+                .ok()
+                .and_then(Path::to_str)
+                .map(str::to_string)
+            else {
+                error!("Skipping document due to invalid path: \"{path:?}\"");
+                return Ok(true);
+            };
+
             index.push(IndexedDocument {
-                title: title.to_str().unwrap().to_string(),
-                created,
-                rel_path: rel_path.to_str().unwrap().to_string(),
+                title: meta.title,
+                created: meta.date.into(),
+                rel_path,
             });
         }
         Ok(true)
@@ -235,7 +338,10 @@ impl Meta {
     escape = "none",
     source = r#"
         <!DOCTYPE html>
-        <html>
+        {% match meta.lang %}
+            {% when Some with (lang) %} <html lang="{{ lang }}">
+            {% when None %} <html lang="en-US">
+        {% endmatch %}
         <head>
             <meta charset="utf-8" />
             <title>{{ meta.title|e("html") }}</title>
@@ -261,7 +367,7 @@ struct DocumentTemplate<'a> {
     markdown: &'a str,
 }
 
-fn markdown_to_document(contents: &str, infered_meta: Meta) -> String {
+fn markdown_to_document(contents: &str, infered_meta: Meta) -> (String, Meta) {
     use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
     use std::sync::LazyLock;
     use syntect::highlighting::{Theme, ThemeSet};
@@ -341,13 +447,14 @@ fn markdown_to_document(contents: &str, infered_meta: Meta) -> String {
     let mut html_output = String::new();
     pulldown_cmark::html::push_html(&mut html_output, parser);
 
+    let meta = meta.unwrap_or(infered_meta);
     let template = DocumentTemplate {
         styles: STYLES,
-        meta: meta.clone().unwrap_or(infered_meta),
+        meta: meta.clone(),
         markdown: &html_output,
     };
     let html = template.render().unwrap();
-    html
+    (html, meta)
 }
 
 fn walk<F: FnMut(bool, &Path) -> std::io::Result<bool>>(
