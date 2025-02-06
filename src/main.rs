@@ -312,8 +312,8 @@ fn generate_index_html(index: &[IndexedDocument]) -> String {
     page.push_str(r#"<ol style="list-style-type: none">"#);
     for doc in index {
         page.push_str(&format!(
-            r#"<li> {} - <a href="/note/{}">{}</a></li>"#,
-            doc.created, doc.rel_path, doc.title
+            r#"<li> <time datetime="{time}">{time}</time> - <a href="/note/{path}">{title}</a></li>"#,
+            time = doc.created, path = doc.rel_path, title = doc.title
         ));
     }
     page.push_str(r#"</ol>"#);
@@ -364,7 +364,7 @@ impl Meta {
         </head>
         <body>
         <h1> {{ meta.title|e("html") }}</h1>
-        {{ markdown }}
+        <article>{{ markdown }}</article>
         </body>
         </html>
         "#
