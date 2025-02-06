@@ -363,6 +363,7 @@ impl Meta {
             <style> {{ styles }} </style>
         </head>
         <body>
+        <h1> {{ meta.title|e("html") }}</h1>
         {{ markdown }}
         </body>
         </html>

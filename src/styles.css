@@ -9,14 +9,17 @@
     --foreground-color: rgb(241, 241, 241);
 
     --font-family: 'Open Sans', 'Noto Sans', sans-serif;
-    --font-size: 14pt;
+    --font-size: 18px;
     --code-font-family: 'Iosevka', 'JetBrains Mono', 'Fira Code', monospace;
     --cooe-font-size: calc(var(--font-size) * 0.8);
     --header-font-family: 'Noto Serif', 'Pt Serif', serif;
 
-    --content-width: 48rem;
+    /*
+        https://designsystem.digital.gov/components/typography/#measure-line-length-2
+        https://designsystem.digital.gov/design-tokens/typesetting/measure/
+    */
+    --content-width: 72ex;
 
-    width: 100%;
     font-size: var(--font-size);
     font-family: var(--font-family);
 }
@@ -25,11 +28,9 @@ body {
     position: absolute;
     top: 0;
     bottom: 0;
-    left: max(calc(50% - var(--content-width) / 2), 0%);
-    right: max(calc(50% - var(--content-width) / 2), 0%);
-    /*background: #181818;
-    color: #f1f1f1;*/
-    
+    left: max(calc(50% - var(--content-width) / 2), 1%);
+    right: max(calc(50% - var(--content-width) / 2), 1%);
+
     background: var(--background-color);
     color: var(--foreground-color);
     font-family: var(--font-family);
