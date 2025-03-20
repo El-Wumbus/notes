@@ -5,15 +5,11 @@ use log::{error, info, warn};
 use rinja::Template;
 use serde::{Deserialize, Serialize};
 use signal_hook::consts::SIGHUP;
+use std::fs;
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
-};
-use std::{
-    fs,
-    io::{self, Read, Write},
-};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use tiny_http::{Header, Method, Request, Response, Server};
 
 #[allow(dead_code)]
@@ -26,7 +22,7 @@ struct Config {
     #[serde(default = "Config::default_content_path")]
     content_path: PathBuf,
     #[serde(default = "Config::default_bind")]
-    bind: std::net::SocketAddr,
+    bind:         std::net::SocketAddr,
 }
 
 impl Config {
@@ -42,15 +38,15 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             content_path: Self::default_content_path(),
-            bind: Self::default_bind(),
+            bind:         Self::default_bind(),
         }
     }
 }
 
 #[derive(Debug, Clone)]
 struct IndexedDocument {
-    title: String,
-    created: NaiveDate,
+    title:    String,
+    created:  NaiveDate,
     rel_path: String,
 }
 type Index = Vec<IndexedDocument>;
@@ -156,8 +152,8 @@ fn load_config(config_path: impl AsRef<Path>) -> Config {
 #[derive(Default)]
 struct SrvState {
     content_path: PathBuf,
-    index: Index,
-    index_html: String,
+    index:        Index,
+    index_html:   String,
 }
 
 impl SrvState {
@@ -166,13 +162,13 @@ impl SrvState {
         if index.is_empty() {
             warn!("Index is empty!");
         }
-        let (index_html, _) = markdown_to_document(
+        let (index_html, _) = mdtodoc(
             &generate_index_html(&index),
             Meta {
                 title: String::from("Index"),
-                date: NaiveDate::default().into(),
-                lang: None,
-                desc: None,
+                date:  NaiveDate::default().into(),
+                lang:  None,
+                desc:  None,
             },
         );
         Ok(Self {
@@ -217,7 +213,7 @@ impl SrvState {
                     };
                     let data_path = state.content_path.join(entry.rel_path.as_str());
                     let data = std::fs::read_to_string(&data_path).unwrap();
-                    let (document, _) = markdown_to_document(
+                    let (document, _) = mdtodoc(
                         &data,
                         Meta::inferred(entry.title.clone(), entry.created),
                     );
@@ -282,8 +278,7 @@ fn generate_index(content_path: &Path) -> std::io::Result<Index> {
 
             let mut f = fs::File::open(path)?;
             f.read_to_string(&mut contents)?;
-            let (_, meta) =
-                markdown_to_document(&contents, Meta::inferred(title, created));
+            let (_, meta) = mdtodoc(&contents, Meta::inferred(title, created));
             contents.clear();
             let Some(rel_path) = path
                 .strip_prefix(content_path)
@@ -323,9 +318,9 @@ fn generate_index_html(index: &[IndexedDocument]) -> String {
 #[derive(Debug, Clone, Deserialize)]
 struct Meta {
     title: String,
-    date: NaiveDateTime,
-    lang: Option<String>,
-    desc: Option<String>,
+    date:  NaiveDateTime,
+    lang:  Option<String>,
+    desc:  Option<String>,
 }
 
 impl Meta {
@@ -362,21 +357,27 @@ impl Meta {
             {% endmatch %}
             <style> {{ styles }} </style>
         </head>
-        <body>
+        <body><main>
         <h1> {{ meta.title|e("html") }}</h1>
         <article>{{ markdown }}</article>
-        </body>
+        </main></body>
         </html>
         "#
 )]
 struct DocumentTemplate<'a> {
-    meta: Meta,
-    styles: &'a str,
+    meta:     Meta,
+    styles:   &'a str,
     markdown: &'a str,
 }
 
-fn markdown_to_document(contents: &str, infered_meta: Meta) -> (String, Meta) {
-    use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
+fn mdtodoc(md: &str, infered_meta: Meta) -> (String, Meta) {
+    use std::collections::HashMap;
+    use std::fmt::Write as _;
+
+    use pulldown_cmark::{
+        CodeBlockKind, CowStr, Event, Options, Parser, Tag, TagEnd, html,
+    };
+
     use std::sync::LazyLock;
     use syntect::highlighting::{Theme, ThemeSet};
     use syntect::parsing::SyntaxSet;
@@ -397,69 +398,232 @@ fn markdown_to_document(contents: &str, infered_meta: Meta) -> (String, Meta) {
 
     let mut options = Options::empty();
     options.insert(Options::ENABLE_GFM);
+    options.insert(Options::ENABLE_FOOTNOTES);
+    options.insert(Options::ENABLE_MATH);
 
     let mut state = ParseState::default();
     let mut code = String::new();
     let mut meta = None;
     let mut syntax = SYNTAX_SET.find_syntax_plain_text();
-    let parser = Parser::new_ext(contents, options).filter_map(|event| match event {
-        Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(lang))) => {
-            let lang = lang.trim();
-            if lang == "meta" {
-                state = ParseState::Meta;
-                None
-            } else {
-                state = ParseState::Highlight;
-                syntax = SYNTAX_SET
-                    .find_syntax_by_token(lang)
-                    .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
-                None
-            }
-        }
-        Event::Text(text) => match state {
-            ParseState::Normal => Some(Event::Text(text)),
-            ParseState::Meta => {
-                match toml::de::from_str::<Meta>(&text) {
-                    Ok(m) => meta = Some(m),
-                    Err(e) => error!("Failed to parse metadata: {e}"),
+
+    // To generate this style, you have to collect the footnotes at the end, while
+    // parsing. You also need to count usages.
+    let mut footnotes = Vec::new();
+    let mut in_footnote = Vec::new();
+    let mut footnote_numbers = HashMap::new();
+    let parser = Parser::new_ext(md, options)
+        .filter_map(|event| {
+            match event {
+                Event::Start(Tag::FootnoteDefinition(_)) => {
+                    in_footnote.push(vec![event]);
+                    None
                 }
-                None
+                Event::End(TagEnd::FootnoteDefinition) => {
+                    let mut f = in_footnote.pop().unwrap();
+                    f.push(event);
+                    footnotes.push(f);
+                    None
+                }
+                Event::FootnoteReference(name) => {
+                    let n = footnote_numbers.len() + 1;
+                    let (n, nr) = footnote_numbers.entry(name.clone()).or_insert((n, 0usize));
+                    *nr += 1;
+                    let html = Event::Html(format!(r##"<sup class="footnote-reference" id="fr-{name}-{nr}"><a href="#fn-{name}">[{n}]</a></sup>"##).into());
+                    if in_footnote.is_empty() {
+                        Some(html)
+                    } else {
+                        in_footnote.last_mut().unwrap().push(html);
+                        None
+                    }
+                }
+                _ if !in_footnote.is_empty() => {
+                    in_footnote.last_mut().unwrap().push(event);
+                    None
+                }
+                Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(lang))) => {
+                    let lang = lang.trim();
+                    if lang == "meta" {
+                        state = ParseState::Meta;
+                        None
+                    } else {
+                        state = ParseState::Highlight;
+                        syntax = SYNTAX_SET
+                            .find_syntax_by_token(lang)
+                            .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
+                        None
+                    }
+                }
+                Event::Text(text) => match state {
+                    ParseState::Normal => Some(Event::Text(text)),
+                    ParseState::Meta => {
+                        match toml::de::from_str::<Meta>(&text) {
+                            Ok(m) => meta = Some(m),
+                            Err(e) => error!("Failed to parse metadata: {e}"),
+                        }
+                        None
+                    }
+                    ParseState::Highlight => {
+                        code.push_str(&text);
+                        None
+                    }
+                },
+                Event::End(TagEnd::CodeBlock) => match state {
+                    ParseState::Normal => Some(Event::End(TagEnd::CodeBlock)),
+                    ParseState::Meta => {
+                        state = ParseState::Normal;
+                        None
+                    }
+                    ParseState::Highlight => {
+                        let html = syntect::html::highlighted_html_for_string(
+                            &code,
+                            &SYNTAX_SET,
+                            syntax,
+                            &THEME,
+                        )
+                        .unwrap_or(code.clone());
+                        code.clear();
+                        state = ParseState::Normal;
+                        Some(Event::Html(html.into()))
+                    }
+                },
+                _ => Some(event),
             }
-            ParseState::Highlight => {
-                code.push_str(&text);
-                None
-            }
-        },
-        Event::End(TagEnd::CodeBlock) => match state {
-            ParseState::Normal => Some(Event::End(TagEnd::CodeBlock)),
-            ParseState::Meta => {
-                state = ParseState::Normal;
-                None
-            }
-            ParseState::Highlight => {
-                let html = syntect::html::highlighted_html_for_string(
-                    &code,
-                    &SYNTAX_SET,
-                    syntax,
-                    &THEME,
-                )
-                .unwrap_or(code.clone());
-                code.clear();
-                state = ParseState::Normal;
-                Some(Event::Html(html.into()))
-            }
-        },
-        _ => Some(event),
-    });
+        });
 
-    let mut html_output = String::new();
-    pulldown_cmark::html::push_html(&mut html_output, parser);
+    let mut output = String::new();
+    html::write_html_fmt(&mut output, parser).unwrap();
 
+    // To make the footnotes look right, we need to sort them by their appearance
+    // order, not by the in-tree order of their actual definitions. Unused items
+    // are omitted entirely.
+    //
+    // For example, this code:
+    //
+    //     test [^1] [^2]
+    //     [^2]: second used, first defined
+    //     [^1]: test
+    //
+    // Gets rendered like *this* if you copy it into a GitHub comment box:
+    //
+    //     <p>test <sup>[1]</sup> <sup>[2]</sup></p>
+    //     <hr>
+    //     <ol>
+    //     <li>test ↩</li>
+    //     <li>second used, first defined ↩</li>
+    //     </ol>
+    if !footnotes.is_empty() {
+        footnotes.retain(|f| match f.first() {
+            Some(Event::Start(Tag::FootnoteDefinition(name))) => {
+                footnote_numbers.get(name).unwrap_or(&(0, 0)).1 != 0
+            }
+            _ => false,
+        });
+        footnotes.sort_by_cached_key(|f| match f.first() {
+            Some(Event::Start(Tag::FootnoteDefinition(name))) => {
+                footnote_numbers.get(name).unwrap_or(&(0, 0)).0
+            }
+            _ => unreachable!(),
+        });
+        output.push_str("<hr><ol class=\"footnotes-list\">\n");
+        html::write_html_fmt(
+            &mut output,
+            footnotes.into_iter().flat_map(|fl| {
+                // To write backrefs, the name needs kept until the end of the footnote
+                // definition.
+                let mut name = CowStr::from("");
+                // Backrefs are included in the final paragraph of the footnote, if it's
+                // normal text. For example, this DOM can be produced:
+                //
+                // Markdown:
+                //
+                //     five [^feet].
+                //
+                //     [^feet]:
+                //         A foot is defined, in this case, as 0.3048 m.
+                //
+                //         Historically, the foot has not been defined this way,
+                // corresponding to many         subtly different units
+                // depending on the location.
+                //
+                // HTML:
+                //
+                //     <p>five <sup class="footnote-reference" id="fr-feet-1"><a
+                // href="#fn-feet">[1]</a></sup>.</p>
+                //
+                //     <ol class="footnotes-list">
+                //     <li id="fn-feet">
+                //     <p>A foot is defined, in this case, as 0.3048 m.</p>
+                //     <p>Historically, the foot has not been defined this way,
+                // corresponding to many     subtly different units
+                // depending on the location. <a href="#fr-feet-1">↩</a></p>
+                //     </li>
+                //     </ol>
+                //
+                // This is mostly a visual hack, so that footnotes use less vertical
+                // space.
+                //
+                // If there is no final paragraph, such as a tabular, list, or image
+                // footnote, it gets pushed after the last tag instead.
+                let mut has_written_backrefs = false;
+                let fl_len = fl.len();
+                let footnote_numbers = &footnote_numbers;
+                fl.into_iter().enumerate().map(move |(i, f)| match f {
+                    Event::Start(Tag::FootnoteDefinition(current_name)) => {
+                        name = current_name;
+                        has_written_backrefs = false;
+                        Event::Html(format!(r##"<li id="fn-{name}">"##).into())
+                    }
+                    Event::End(TagEnd::FootnoteDefinition)
+                    | Event::End(TagEnd::Paragraph)
+                        if !has_written_backrefs && i >= fl_len - 2 =>
+                    {
+                        let usage_count = footnote_numbers.get(&name).unwrap().1;
+                        let mut end = String::with_capacity(
+                            name.len()
+                                + (r##" <a href="#fr--1">↩</a></li>"##.len()
+                                    * usage_count),
+                        );
+                        for usage in 1..=usage_count {
+                            if usage == 1 {
+                                write!(
+                                    &mut end,
+                                    r##" <a href="#fr-{name}-{usage}">↩</a>"##
+                                )
+                                .unwrap();
+                            } else {
+                                write!(
+                                    &mut end,
+                                    r##" <a href="#fr-{name}-{usage}">↩{usage}</a>"##
+                                )
+                                .unwrap();
+                            }
+                        }
+                        has_written_backrefs = true;
+                        if f == Event::End(TagEnd::FootnoteDefinition) {
+                            end.push_str("</li>\n");
+                        } else {
+                            end.push_str("</p>\n");
+                        }
+                        Event::Html(end.into())
+                    }
+                    Event::End(TagEnd::FootnoteDefinition) => {
+                        Event::Html("</li>\n".into())
+                    }
+                    Event::FootnoteReference(_) => {
+                        unreachable!("converted to HTML earlier")
+                    }
+                    f => f,
+                })
+            }),
+        )
+        .unwrap();
+        output.push_str("</ol>\n");
+    }
     let meta = meta.unwrap_or(infered_meta);
     let template = DocumentTemplate {
-        styles: STYLES,
-        meta: meta.clone(),
-        markdown: &html_output,
+        styles:   STYLES,
+        meta:     meta.clone(),
+        markdown: &output,
     };
     let html = template.render().unwrap();
     (html, meta)

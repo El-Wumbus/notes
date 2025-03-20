@@ -9,9 +9,9 @@
     --foreground-color: rgb(241, 241, 241);
 
     --font-family: 'Open Sans', 'Noto Sans', sans-serif;
-    --font-size: 18px;
+    /* --font-size: 18px; */
     --code-font-family: 'Iosevka', 'JetBrains Mono', 'Fira Code', monospace;
-    --cooe-font-size: calc(var(--font-size) * 0.8);
+    /* --cooe-font-size: calc(var(--font-size) * 0.8); */
     --header-font-family: 'Noto Serif', 'Pt Serif', serif;
 
     /*
@@ -20,7 +20,7 @@
     */
     --content-width: 72ex;
 
-    font-size: var(--font-size);
+    /* font-size: var(--font-size); */
     font-family: var(--font-family);
 }
 
@@ -38,13 +38,13 @@ body {
 
 math {
     display: block;
-    font-size: calc(var(--font-size) * 1.25);
+    /* font-size: calc(var(--font-size) * 1.25); */
 }
 
 pre {
     padding: 1em;
     overflow-x: scroll;
-    font-size: var(--code-font-size);
+    /* font-size: var(--code-font-size); */
 }
 code {
     padding: 0.2em;
@@ -52,7 +52,7 @@ code {
 
 pre, code {
     font-family: var(--code-font-family);
-    font-size: var(--code-font-size);
+    /* font-size: var(--code-font-size); */
     border-radius: 0.1em;
 }
 

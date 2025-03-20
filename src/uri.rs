@@ -6,24 +6,24 @@ pub enum Error {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Uri<'a> {
-    pub scheme: Option<&'a str>,
+    pub scheme:   Option<&'a str>,
     pub userinfo: Option<&'a str>,
-    pub host: Option<&'a str>,
-    pub port: Option<&'a str>,
-    pub path: Option<&'a str>,
-    pub query: Option<&'a str>,
+    pub host:     Option<&'a str>,
+    pub port:     Option<&'a str>,
+    pub path:     Option<&'a str>,
+    pub query:    Option<&'a str>,
     pub fragment: Option<&'a str>,
 }
 
 impl<'a> Uri<'a> {
     pub fn new(mut src: &'a str) -> Result<Self, Error> {
         let mut uri = Uri {
-            scheme: None,
+            scheme:   None,
             userinfo: None,
-            host: None,
-            port: None,
-            path: None,
-            query: None,
+            host:     None,
+            port:     None,
+            path:     None,
+            query:    None,
             fragment: None,
         };
 
@@ -80,12 +80,12 @@ impl<'a> TryFrom<&'a str> for Uri<'a> {
 impl<'a> From<&'a UriOwned> for Uri<'a> {
     fn from(uri: &'a UriOwned) -> Self {
         Self {
-            scheme: uri.scheme.as_deref(),
+            scheme:   uri.scheme.as_deref(),
             userinfo: uri.userinfo.as_deref(),
-            host: uri.host.as_deref(),
-            port: uri.port.as_deref(),
-            path: uri.path.as_deref(),
-            query: uri.query.as_deref(),
+            host:     uri.host.as_deref(),
+            port:     uri.port.as_deref(),
+            path:     uri.path.as_deref(),
+            query:    uri.query.as_deref(),
             fragment: uri.fragment.as_deref(),
         }
     }
@@ -132,24 +132,24 @@ impl std::fmt::Display for Uri<'_> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UriOwned {
-    pub scheme: Option<String>,
+    pub scheme:   Option<String>,
     pub userinfo: Option<String>,
-    pub host: Option<String>,
-    pub port: Option<String>,
-    pub path: Option<String>,
-    pub query: Option<String>,
+    pub host:     Option<String>,
+    pub port:     Option<String>,
+    pub path:     Option<String>,
+    pub query:    Option<String>,
     pub fragment: Option<String>,
 }
 
 impl From<Uri<'_>> for UriOwned {
     fn from(uri: Uri) -> Self {
         Self {
-            scheme: uri.scheme.map(String::from),
+            scheme:   uri.scheme.map(String::from),
             userinfo: uri.userinfo.map(String::from),
-            host: uri.host.map(String::from),
-            port: uri.port.map(String::from),
-            path: uri.path.map(String::from),
-            query: uri.query.map(String::from),
+            host:     uri.host.map(String::from),
+            port:     uri.port.map(String::from),
+            path:     uri.path.map(String::from),
+            query:    uri.query.map(String::from),
             fragment: uri.fragment.map(String::from),
         }
     }
