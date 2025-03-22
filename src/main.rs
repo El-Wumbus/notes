@@ -307,7 +307,7 @@ fn generate_index_html(index: &[IndexedDocument]) -> String {
     page.push_str(r#"<ol style="list-style-type: none">"#);
     for doc in index {
         page.push_str(&format!(
-            r#"<li> <time datetime="{time}">{time}</time> - <a href="/note/{path}">{title}</a></li>"#,
+            r#"<li> <time datetime="{time}+0:0">{time}</time> - <a href="/note/{path}">{title}</a></li>"#,
             time = doc.created, path = doc.rel_path, title = doc.title
         ));
     }
@@ -361,6 +361,16 @@ impl Meta {
         <h1> {{ meta.title|e("html") }}</h1>
         <article>{{ markdown }}</article>
         </main></body>
+
+        <script>
+        // Javascript is the worst thing ever. The idea that anyone uses this professionally is crazy.
+        window.addEventListener("load", () => {
+            document.querySelectorAll('time').forEach($e => {
+                const date = new Date($e.dateTime);
+                $e.innerText = date.toLocaleDateString(undefined, {timeZone: 'UTC', day: 'numeric', month: 'long', year: 'numeric'});
+            });
+        });
+        </script>
         </html>
         "#
 )]
@@ -414,6 +424,15 @@ fn mdtodoc(md: &str, infered_meta: Meta) -> (String, Meta) {
     let parser = Parser::new_ext(md, options)
         .filter_map(|event| {
             match event {
+                Event::Code(code) => {
+                    let parts = code.trim().splitn(3, '-');
+                    if parts.clone().all(|x| !x.is_empty() && x.find('-').is_none() && x.chars().all(char::is_numeric)) && parts.skip(1).all(|x|x.len() < 3) {
+                        // I think this is a date in the format "2025-01-01"
+                        Some(Event::Html(format!(r#"<time datetime="{code}">{code}</time>"#).into()))
+                    } else {
+                        Some(Event::Code(code))
+                    }
+                }
                 Event::Start(Tag::FootnoteDefinition(_)) => {
                     in_footnote.push(vec![event]);
                     None
